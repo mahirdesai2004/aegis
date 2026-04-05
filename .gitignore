@@ -35,3 +35,4 @@ dist-ssr/
 .DS_Store
 frontend/src/assets/
 frontend/public/*.svg
+yolov8n.pt

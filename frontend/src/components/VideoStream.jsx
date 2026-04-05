@@ -1,133 +1,114 @@
 /**
- * VideoStream.jsx — Webcam Capture & Frame Processing
+ * VideoStream.jsx — Live Webcam Feed (v3)
  *
- * Captures frames from the user's webcam, resizes them for
- * efficiency, and sends them to the backend at a controlled
- * ~10 FPS rate. Displays the processed (redacted) frame returned
- * by the API.
+ * Sequential async loop: capture → send → display → wait → repeat.
+ * Never overlaps requests. Uses AbortController for timeout safety.
+ * Target: ~6-8 FPS.
  */
 
 import { useRef, useEffect, useState, useCallback } from 'react';
 
-// ── Constants ────────────────────────────────────────────────
 const API_URL = 'http://localhost:8000/process_frame';
-const TARGET_FPS = 10;
-const FRAME_INTERVAL_MS = 1000 / TARGET_FPS; // ~100ms
-const MAX_CANVAS_WIDTH = 640; // resize before sending
+const FRAME_INTERVAL = 150;   // ms between frames
+const FETCH_TIMEOUT = 5000;   // ms timeout per request
+const MAX_WIDTH = 640;
 
 function VideoStream({ redact, streaming, onRiskUpdate }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const displayRef = useRef(null);
+  const streamRef = useRef(null);
   const [cameraReady, setCameraReady] = useState(false);
 
-  // ── Start / stop webcam on mount ──────────────────────────
+  // Start webcam once on mount
   useEffect(() => {
-    let stream = null;
+    let cancelled = false;
 
-    const initCamera = async () => {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user', width: { ideal: 640 } },
-        });
-        if (videoRef.current) {
+    navigator.mediaDevices
+      .getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } } })
+      .then((stream) => {
+        if (!cancelled && videoRef.current) {
           videoRef.current.srcObject = stream;
+          streamRef.current = stream;
+          setCameraReady(true);
         }
-        setCameraReady(true);
-      } catch (err) {
-        console.error('Camera access denied:', err);
-      }
-    };
-
-    initCamera();
+      })
+      .catch((err) => console.error('Camera error:', err));
 
     return () => {
-      if (stream) stream.getTracks().forEach((t) => t.stop());
+      cancelled = true;
+      streamRef.current?.getTracks().forEach((t) => t.stop());
     };
   }, []);
 
-  // ── Stable callback for risk updates ──────────────────────
-  const updateRisk = useCallback(
-    (data) => onRiskUpdate(data),
-    [onRiskUpdate]
-  );
+  const updateRisk = useCallback((d) => onRiskUpdate(d), [onRiskUpdate]);
 
-  // ── Frame capture loop (throttled to ~10 FPS) ─────────────
+  // Frame processing loop
   useEffect(() => {
     if (!streaming || !cameraReady) return;
+    let active = true;
 
-    let timerId = null;
-    let isBusy = false;
+    const loop = async () => {
+      while (active) {
+        const video = videoRef.current;
+        const canvas = canvasRef.current;
+        if (!video || !canvas || video.readyState < 2) {
+          await sleep(100);
+          continue;
+        }
 
-    const tick = async () => {
-      if (isBusy) return;
-      const video = videoRef.current;
-      const canvas = canvasRef.current;
-      if (!video || !canvas || video.readyState < video.HAVE_ENOUGH_DATA) return;
+        // Draw frame to canvas (resized)
+        const scale = Math.min(1, MAX_WIDTH / video.videoWidth);
+        canvas.width = Math.round(video.videoWidth * scale);
+        canvas.height = Math.round(video.videoHeight * scale);
+        canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      isBusy = true;
+        // Send to backend
+        try {
+          const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.7));
+          if (!blob || !active) break;
 
-      // Resize canvas to max width for network efficiency
-      const scale = Math.min(1, MAX_CANVAS_WIDTH / video.videoWidth);
-      canvas.width = Math.round(video.videoWidth * scale);
-      canvas.height = Math.round(video.videoHeight * scale);
+          const form = new FormData();
+          form.append('file', blob, 'frame.jpg');
+          form.append('redact', String(redact));
 
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT);
 
-      // Convert to JPEG blob
-      canvas.toBlob(
-        async (blob) => {
-          if (!blob) { isBusy = false; return; }
+          const res = await fetch(API_URL, { method: 'POST', body: form, signal: ctrl.signal });
+          clearTimeout(timer);
 
-          const formData = new FormData();
-          formData.append('file', blob, 'frame.jpg');
-          formData.append('redact', String(redact));
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
 
-          try {
-            const res = await fetch(API_URL, { method: 'POST', body: formData });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          if (!active) break;
 
-            const data = await res.json();
+          updateRisk({ score: data.risk_score, level: data.risk_level, labels: data.labels });
 
-            // Update risk dashboard
-            updateRisk({
-              score: data.risk_score,
-              level: data.risk_level,
-              labels: data.labels,
-            });
-
-            // Display the processed frame
-            if (displayRef.current) {
-              displayRef.current.src = `data:image/jpeg;base64,${data.processed_frame}`;
-            }
-          } catch (err) {
-            console.error('Frame processing error:', err);
-          } finally {
-            isBusy = false;
+          if (displayRef.current) {
+            displayRef.current.src = `data:image/jpeg;base64,${data.processed_frame}`;
           }
-        },
-        'image/jpeg',
-        0.75
-      );
+        } catch (err) {
+          if (err.name !== 'AbortError') console.error('Frame:', err.message);
+        }
+
+        await sleep(FRAME_INTERVAL);
+      }
     };
 
-    timerId = setInterval(tick, FRAME_INTERVAL_MS);
-
-    return () => clearInterval(timerId);
+    loop();
+    return () => { active = false; };
   }, [streaming, cameraReady, redact, updateRisk]);
 
-  // ── Render ────────────────────────────────────────────────
   return (
     <div className="video-container" id="video-stream">
-      {/* Hidden: native video + offscreen canvas */}
       <video ref={videoRef} autoPlay playsInline muted style={{ display: 'none' }} />
       <canvas ref={canvasRef} style={{ display: 'none' }} />
 
       {streaming ? (
         <>
-          <div className="pulse-ring">LIVE</div>
-          <img ref={displayRef} alt="Processed feed" />
+          <div className="live-badge">● LIVE</div>
+          <img ref={displayRef} alt="Processed feed" className="processed-img" />
         </>
       ) : (
         <div className="idle-message">
@@ -141,5 +122,7 @@ function VideoStream({ redact, streaming, onRiskUpdate }) {
     </div>
   );
 }
+
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 export default VideoStream;
