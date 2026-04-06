@@ -7,3 +7,5 @@ python-multipart
 pydantic
 numpy
 pillow
+torch
+torchvision
