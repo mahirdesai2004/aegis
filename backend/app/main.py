@@ -168,10 +168,10 @@ def _process_pipeline(frame: np.ndarray, do_redact: bool = True, run_ocr: bool =
 
     # 7. Redaction (fast)
     if do_redact:
-        # Blur on unknown faces
+        # Blur on unknown faces (no expansion)
         unknown_face_boxes = [face["box"] for face in face_results if not face["known"]]
         if unknown_face_boxes:
-            frame = redactor.blur_region(frame, unknown_face_boxes, expand=True)
+            frame = redactor.blur_region(frame, unknown_face_boxes, expand=False)
 
         # Blur on devices
         if device_boxes:
