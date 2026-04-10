@@ -9,7 +9,7 @@ A real-time computer vision system that detects and redacts sensitive informatio
 - **Face Recognition** — HSV histogram-based known/unknown face classification
 - **Text Extraction** — EasyOCR reads visible text; regex patterns detect PII
 - **Risk Scoring** — Rule-based engine calculates LOW/MEDIUM/HIGH risk levels
-- **Smart Redaction** — Emoji overlay for unknown faces, Gaussian blur for devices
+- **Smart Redaction** — Gaussian blur for unknown faces and devices
 - **Safe Mode** — Auto-register known faces from reference image
 - **Dark UI** — React dashboard with live risk metrics and detection labels
 
@@ -85,7 +85,7 @@ Frontend runs on `http://localhost:5173`
 
 1. Start both backend and frontend
 2. Click "Start Scanning" to begin live video processing
-3. Unknown faces are overlaid with emoji; devices are blurred
+3. Unknown faces are blurred; devices are blurred
 4. Risk score updates in real-time based on detections
 5. Use "Safe Mode" to register known faces
 6. Upload group photos with "Image Upload" for batch processing
